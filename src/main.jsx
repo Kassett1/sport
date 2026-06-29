@@ -6,28 +6,47 @@ import './styles.css';
 const STORAGE_KEY = 'cali-progress-v1';
 
 const defaultPlan = [
-  { day: 'Lun', type: 'Circuit Phase 1' },
+  { day: 'Lun', type: 'Circuit' },
   { day: 'Mar', type: '' },
-  { day: 'Mer', type: 'Progression technique' },
+  { day: 'Mer', type: 'Circuit' },
   { day: 'Jeu', type: '' },
-  { day: 'Ven', type: 'Circuit Phase 1' },
-  { day: 'Sam', type: 'Etirements' },
+  { day: 'Ven', type: 'Circuit' },
+  { day: 'Sam', type: '' },
   { day: 'Dim', type: '' },
 ];
 
-const planOptions = ['', 'Circuit Phase 1', 'Progression technique', 'Etirements'];
+const planOptions = ['', 'Circuit', 'Circuit + HIIT'];
 
 function loadState() {
   try {
     const saved = JSON.parse(localStorage.getItem(STORAGE_KEY));
     return {
       completed: saved?.completed ?? {},
-      logs: saved?.logs ?? [],
-      plan: saved?.plan ?? defaultPlan,
+      circuitNotes: saved?.circuitNotes ?? {},
+      plan: normalizePlan(saved?.plan),
     };
   } catch {
-    return { completed: {}, logs: [], plan: defaultPlan };
+    return { completed: {}, circuitNotes: {}, plan: defaultPlan };
   }
+}
+
+function normalizePlan(savedPlan) {
+  if (!Array.isArray(savedPlan)) return defaultPlan;
+
+  return defaultPlan.map((defaultSlot, index) => {
+    const savedSlot = savedPlan[index];
+    if (!savedSlot) return defaultSlot;
+
+    return {
+      day: defaultSlot.day,
+      type: planOptions.includes(savedSlot.type) ? savedSlot.type : normalizePlanType(savedSlot.type),
+    };
+  });
+}
+
+function normalizePlanType(type) {
+  if (type === 'Circuit Phase 1' || type === 'Progression technique') return 'Circuit';
+  return '';
 }
 
 function saveState(nextState) {
@@ -37,17 +56,12 @@ function saveState(nextState) {
 function App() {
   const [state, setState] = useState(loadState);
   const [activeFamily, setActiveFamily] = useState(phaseOne.families[0].id);
-  const [logDraft, setLogDraft] = useState({
-    exercise: phaseOne.families[0].name,
-    reps: '',
-    note: '',
-  });
 
   const stats = useMemo(() => getStats(state.completed), [state.completed]);
   const currentFamily = phaseOne.families.find((family) => family.id === activeFamily);
-  const nextGoals = phaseOne.families.map((family) => ({
+  const circuitGoals = phaseOne.families.map((family) => ({
     family,
-    level: family.levels.find((level) => !level.optional && !state.completed[level.id]),
+    level: family.levels.find((level) => !state.completed[level.id]),
   }));
 
   function updateState(updater) {
@@ -58,14 +72,23 @@ function App() {
     });
   }
 
-  function toggleLevel(levelId) {
-    updateState((previous) => ({
-      ...previous,
-      completed: {
-        ...previous.completed,
-        [levelId]: !previous.completed[levelId],
-      },
-    }));
+  function toggleLevel(familyId, levelId) {
+    const family = phaseOne.families.find((item) => item.id === familyId);
+    const levelIndex = family.levels.findIndex((level) => level.id === levelId);
+    const isCompleted = Boolean(state.completed[levelId]);
+
+    updateState((previous) => {
+      const completed = { ...previous.completed };
+      family.levels.forEach((level, index) => {
+        if (isCompleted) {
+          if (index >= levelIndex) completed[level.id] = false;
+        } else if (index <= levelIndex) {
+          completed[level.id] = true;
+        }
+      });
+
+      return { ...previous, completed };
+    });
   }
 
   function updatePlan(index, type) {
@@ -75,22 +98,14 @@ function App() {
     }));
   }
 
-  function addLog(event) {
-    event.preventDefault();
-    if (!logDraft.reps.trim() && !logDraft.note.trim()) return;
-
+  function updateCircuitNote(familyId, value) {
     updateState((previous) => ({
       ...previous,
-      logs: [
-        {
-          id: crypto.randomUUID(),
-          date: new Date().toISOString(),
-          ...logDraft,
-        },
-        ...previous.logs,
-      ].slice(0, 30),
+      circuitNotes: {
+        ...previous.circuitNotes,
+        [familyId]: value,
+      },
     }));
-    setLogDraft({ ...logDraft, reps: '', note: '' });
   }
 
   return (
@@ -106,21 +121,20 @@ function App() {
         </div>
       </section>
 
-      <section className="progress-panel">
+      <section className="glass-panel progress-panel">
         <div>
           <span className="muted">Progression</span>
-          <strong>{stats.requiredDone}/{stats.requiredTotal} niveaux cles</strong>
+          <strong>{stats.completedDone}/{stats.completedTotal} niveaux valides</strong>
         </div>
         <div className="progress-track" aria-label={`Progression ${stats.percent}%`}>
           <span style={{ width: `${stats.percent}%` }} />
         </div>
-        <p>{stats.xp} XP gagnes · {stats.optionalDone} optionnel(s) valide(s)</p>
+        <p>{stats.xp} XP / {stats.requiredDone} niveaux principaux / {stats.optionalDone} optionnels</p>
       </section>
 
-      <section className="section">
+      <section className="glass-panel section">
         <div className="section-title">
           <h2>Planning</h2>
-          <span>calisthenie uniquement</span>
         </div>
         <div className="week-grid">
           {state.plan.map((slot, index) => (
@@ -138,22 +152,32 @@ function App() {
         </div>
       </section>
 
-      <section className="section">
+      <section className="glass-panel section">
         <div className="section-title">
-          <h2>A faire ensuite</h2>
-          <span>niveaux obligatoires</span>
+          <h2>Circuit</h2>
+          <span>prochaine cible et reps</span>
         </div>
-        <div className="next-list">
-          {nextGoals.map(({ family, level }) => (
-            <button className="next-item" key={family.id} onClick={() => setActiveFamily(family.id)}>
-              <span>{family.name}</span>
-              <strong>{level ? level.name : 'Maitrise'}</strong>
-            </button>
+        <div className="circuit-list">
+          {circuitGoals.map(({ family, level }) => (
+            <article className="circuit-item" key={family.id}>
+              <button className="circuit-target" onClick={() => setActiveFamily(family.id)}>
+                <span>{family.name}</span>
+                <strong>{level ? level.name : 'Maitrise'}</strong>
+              </button>
+              <label>
+                <span>Mes reps</span>
+                <input
+                  value={state.circuitNotes[family.id] ?? ''}
+                  onChange={(event) => updateCircuitNote(family.id, event.target.value)}
+                  placeholder="ex: 3x5 propres, 2 negatives lentes"
+                />
+              </label>
+            </article>
           ))}
         </div>
       </section>
 
-      <section className="section">
+      <section className="glass-panel section">
         <div className="section-title">
           <h2>Objectifs</h2>
           <span>{currentFamily.finalGoal}</span>
@@ -176,7 +200,7 @@ function App() {
                 <input
                   type="checkbox"
                   checked={Boolean(state.completed[level.id])}
-                  onChange={() => toggleLevel(level.id)}
+                  onChange={() => toggleLevel(currentFamily.id, level.id)}
                 />
                 <span>
                   {level.name}
@@ -184,50 +208,6 @@ function App() {
                 </span>
               </label>
               <p>{level.validation}</p>
-            </article>
-          ))}
-        </div>
-      </section>
-
-      <section className="section">
-        <div className="section-title">
-          <h2>Journal</h2>
-          <span>records et cadence</span>
-        </div>
-        <form className="log-form" onSubmit={addLog}>
-          <select
-            value={logDraft.exercise}
-            onChange={(event) => setLogDraft({ ...logDraft, exercise: event.target.value })}
-          >
-            {phaseOne.families.map((family) => (
-              <option value={family.name} key={family.id}>
-                {family.name}
-              </option>
-            ))}
-          </select>
-          <input
-            inputMode="text"
-            placeholder="Series / reps"
-            value={logDraft.reps}
-            onChange={(event) => setLogDraft({ ...logDraft, reps: event.target.value })}
-          />
-          <input
-            placeholder="Note rapide"
-            value={logDraft.note}
-            onChange={(event) => setLogDraft({ ...logDraft, note: event.target.value })}
-          />
-          <button type="submit">Ajouter</button>
-        </form>
-        <div className="log-list">
-          {state.logs.length === 0 && <p className="empty">Aucune seance notee pour le moment.</p>}
-          {state.logs.map((log) => (
-            <article className="log-item" key={log.id}>
-              <div>
-                <strong>{log.exercise}</strong>
-                <span>{new Date(log.date).toLocaleDateString('fr-FR')}</span>
-              </div>
-              <p>{log.reps || log.note}</p>
-              {log.reps && log.note && <small>{log.note}</small>}
             </article>
           ))}
         </div>
@@ -240,14 +220,16 @@ function getStats(completed) {
   const levels = phaseOne.families.flatMap((family) => family.levels);
   const required = levels.filter((level) => !level.optional);
   const optional = levels.filter((level) => level.optional);
+  const completedLevels = levels.filter((level) => completed[level.id]);
   const requiredDone = required.filter((level) => completed[level.id]).length;
   const optionalDone = optional.filter((level) => completed[level.id]).length;
-  const percent = Math.round((requiredDone / required.length) * 100);
+  const percent = Math.round((completedLevels.length / levels.length) * 100);
   const xp = requiredDone * 100 + optionalDone * 40;
 
   return {
+    completedDone: completedLevels.length,
+    completedTotal: levels.length,
     requiredDone,
-    requiredTotal: required.length,
     optionalDone,
     percent,
     xp,
