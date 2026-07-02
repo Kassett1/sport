@@ -82,6 +82,7 @@ button:disabled {
 
 .control-row button,
 .mode-switch button,
+.phase-switch button,
 .primary-action {
   min-height: 40px;
   border: 1px solid rgba(255, 255, 255, 0.68);
@@ -94,6 +95,7 @@ button:disabled {
 }
 
 .mode-switch button.active,
+.phase-switch button.active,
 .primary-action {
   border-color: rgba(239, 85, 50, 0.58);
   background: linear-gradient(135deg, #ffcc38, #ef5532);
@@ -294,6 +296,17 @@ button:disabled {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 10px;
+}
+
+.phase-panel {
+  display: grid;
+  gap: 10px;
+}
+
+.phase-switch {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
 }
 
 .day-card,

@@ -1,12 +1,14 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { phaseOne } from './data/phase1.js';
+import { phaseTwo } from './data/phase2.js';
 import './styles.css';
 
 const STORAGE_KEY = 'cali-progress-v1';
 const MIN_CIRCUIT_SESSION_MS = 10 * 60 * 1000;
 const HIIT_ROUND_MS = 2.5 * 60 * 1000;
 const HIIT_ROUNDS = 4;
+const phases = [phaseOne, phaseTwo];
 
 const defaultPlan = [
   { day: 'Lun', type: 'Circuit' },
@@ -19,6 +21,7 @@ const defaultPlan = [
 ];
 
 const planOptions = ['', 'Circuit', 'HIIT'];
+const phaseTwoPlanOptions = ['', ...phaseTwo.circuits.map((circuit) => circuit.name)];
 const views = [
   { id: 'home', label: 'Circuit', icon: 'home' },
   { id: 'timer', label: 'Chrono', icon: 'timer' },
@@ -52,6 +55,16 @@ const trainingProtocols = {
     { label: 'Repos exos', value: '15-20 sec' },
     { label: 'Repos tour', value: '1 min' },
   ],
+  phaseTwoTechnique: [
+    { label: 'Objectifs', value: '1-2 exos' },
+    { label: 'Repos', value: '1-2 min' },
+    { label: 'Format', value: 'essais propres' },
+  ],
+  phaseTwoCircuit: [
+    { label: 'Fin de seance', value: '1 circuit' },
+    { label: 'Type', value: 'au choix' },
+    { label: 'Repos', value: 'selon circuit' },
+  ],
 };
 
 const warmupSets = {
@@ -79,6 +92,7 @@ function loadState() {
     return {
       completed: saved?.completed ?? {},
       circuitNotes: saved?.circuitNotes ?? {},
+      activePhaseId: phases.some((phase) => phase.id === saved?.activePhaseId) ? saved.activePhaseId : null,
       plan: normalizePlan(saved?.plan),
       sessions: Array.isArray(saved?.sessions) ? saved.sessions : [],
       records: saved?.records ?? {},
@@ -89,7 +103,7 @@ function loadState() {
 }
 
 function getDefaultState() {
-  return { completed: {}, circuitNotes: {}, plan: defaultPlan, sessions: [], records: {} };
+  return { completed: {}, circuitNotes: {}, activePhaseId: null, plan: defaultPlan, sessions: [], records: {} };
 }
 
 function normalizePlan(savedPlan) {
@@ -110,6 +124,14 @@ function normalizePlanType(type) {
   if (type === 'Circuit Phase 1' || type === 'Progression technique') return 'Circuit';
   if (type === 'Circuit + HIIT') return 'HIIT';
   return '';
+}
+
+function normalizePlanForPhase(plan, phase) {
+  const options = phase.id === phaseTwo.id ? phaseTwoPlanOptions : planOptions;
+  return normalizePlan(plan).map((slot) => ({
+    ...slot,
+    type: options.includes(slot.type) ? slot.type : '',
+  }));
 }
 
 function saveState(nextState) {
@@ -134,12 +156,21 @@ function App() {
     recordWarmupSession(warmup.completedSession);
   }, [warmup.completedSession]);
 
-  const stats = useMemo(() => getStats(state), [state]);
-  const currentFamily = phaseOne.families.find((family) => family.id === activeFamily);
-  const circuitGoals = phaseOne.families.map((family) => ({
+  const phaseOneComplete = isPhaseComplete(phaseOne, state.completed);
+  const activePhase = phases.find((phase) => phase.id === state.activePhaseId) ?? (phaseOneComplete ? phaseTwo : phaseOne);
+  const activePlanOptions = activePhase.id === phaseTwo.id ? phaseTwoPlanOptions : planOptions;
+  const stats = useMemo(() => getStats(state, activePhase), [state, activePhase]);
+  const currentFamily = activePhase.families.find((family) => family.id === activeFamily) ?? activePhase.families[0];
+  const circuitGoals = activePhase.families.map((family) => ({
     family,
     level: getCurrentLevel(family, state.completed),
   }));
+
+  useEffect(() => {
+    if (!activePhase.families.some((family) => family.id === activeFamily)) {
+      setActiveFamily(activePhase.families[0].id);
+    }
+  }, [activeFamily, activePhase]);
 
   function updateState(updater) {
     setState((previous) => {
@@ -150,7 +181,7 @@ function App() {
   }
 
   function toggleLevel(familyId, levelId) {
-    const family = phaseOne.families.find((item) => item.id === familyId);
+    const family = activePhase.families.find((item) => item.id === familyId);
     const levelIndex = family.levels.findIndex((level) => level.id === levelId);
     const isCompleted = Boolean(state.completed[levelId]);
 
@@ -164,8 +195,20 @@ function App() {
         }
       });
 
-      return { ...previous, completed };
+      return {
+        ...previous,
+        completed,
+        activePhaseId: activePhase.id === phaseOne.id && isPhaseComplete(phaseOne, completed) ? phaseTwo.id : previous.activePhaseId,
+      };
     });
+  }
+
+  function selectPhase(phaseId) {
+    updateState((previous) => ({
+      ...previous,
+      activePhaseId: phaseId,
+      plan: normalizePlanForPhase(previous.plan, phases.find((phase) => phase.id === phaseId) ?? phaseOne),
+    }));
   }
 
   function updatePlan(index, type) {
@@ -201,7 +244,7 @@ function App() {
   }
 
   function getStopwatchExercises() {
-    const exercises = phaseOne.families
+    const exercises = activePhase.families
       .map((family) => ({
         id: family.id,
         name: family.name,
@@ -284,8 +327,8 @@ function App() {
     <main className="app-shell">
       <section className="hero">
         <div>
-          <p className="eyebrow">{phaseOne.name}</p>
-          <h1>{getViewTitle(activeView)}</h1>
+          <p className="eyebrow">{activePhase.name}</p>
+          <h1>{getViewTitle(activeView, activePhase)}</h1>
         </div>
         <div className="rank-box">
           <span>Rang</span>
@@ -321,12 +364,16 @@ function App() {
       {activeView === 'home' && (
         <HomeView
           activeFamily={activeFamily}
+          activePhase={activePhase}
+          activePlanOptions={activePlanOptions}
           circuitGoals={circuitGoals}
           currentFamily={currentFamily}
           onLevelToggle={toggleLevel}
           onPlanChange={updatePlan}
+          onPhaseChange={selectPhase}
           onSelectFamily={setActiveFamily}
           onSaveHiit={recordHiitSession}
+          phaseOneComplete={phaseOneComplete}
           plan={state.plan}
           completed={state.completed}
           sessions={state.sessions}
@@ -354,9 +401,29 @@ function App() {
 
 function HomeView(props) {
   const hiitRoundsToday = getTodayHiitRounds(props.sessions);
+  const isPhaseTwo = props.activePhase.id === phaseTwo.id;
 
   return (
     <>
+      <section className="glass-panel section phase-panel">
+        <div className="section-title">
+          <h2>Phase active</h2>
+          <span>{props.phaseOneComplete ? 'Phase 2 debloquee' : 'Phase 1 en cours'}</span>
+        </div>
+        <div className="phase-switch" aria-label="Choix de phase">
+          {phases.map((phase) => (
+            <button
+              className={props.activePhase.id === phase.id ? 'active' : ''}
+              disabled={phase.id === phaseTwo.id && !props.phaseOneComplete}
+              key={phase.id}
+              onClick={() => props.onPhaseChange(phase.id)}
+            >
+              {phase.name}
+            </button>
+          ))}
+        </div>
+      </section>
+
       <section className="glass-panel section">
         <div className="section-title">
           <h2>Planning</h2>
@@ -365,8 +432,11 @@ function HomeView(props) {
           {props.plan.map((slot, index) => (
             <label className={slot.type ? 'day-card filled' : 'day-card'} key={slot.day}>
               <span>{slot.day}</span>
-              <select value={slot.type} onChange={(event) => props.onPlanChange(index, event.target.value)}>
-                {planOptions.map((option) => (
+              <select
+                value={props.activePlanOptions.includes(slot.type) ? slot.type : ''}
+                onChange={(event) => props.onPlanChange(index, event.target.value)}
+              >
+                {props.activePlanOptions.map((option) => (
                   <option value={option} key={option}>
                     {option || 'Vide'}
                   </option>
@@ -377,9 +447,18 @@ function HomeView(props) {
         </div>
       </section>
 
-      <CollapsibleSection title="Seance circuit" summary="prochaine cible" defaultOpen>
-        <ProtocolGrid items={trainingProtocols.prep} title="Pre-entrainement" />
-        <ProtocolGrid items={trainingProtocols.classic} title="Circuit classique" />
+      <CollapsibleSection title={isPhaseTwo ? 'Seance phase 2' : 'Seance circuit'} summary={isPhaseTwo ? 'technique + circuit' : 'prochaine cible'} defaultOpen>
+        {isPhaseTwo ? (
+          <>
+            <ProtocolGrid items={trainingProtocols.phaseTwoTechnique} title="Technique" />
+            <ProtocolGrid items={trainingProtocols.phaseTwoCircuit} title="Circuit" />
+          </>
+        ) : (
+          <>
+            <ProtocolGrid items={trainingProtocols.prep} title="Pre-entrainement" />
+            <ProtocolGrid items={trainingProtocols.classic} title="Circuit classique" />
+          </>
+        )}
         <div className="circuit-list">
           {props.circuitGoals.map(({ family, level }) => (
             <article className="circuit-item" key={family.id}>
@@ -390,27 +469,39 @@ function HomeView(props) {
             </article>
           ))}
         </div>
+        {isPhaseTwo && (
+          <div className="hiit-list compact">
+            {phaseTwo.circuits.map((circuit) => (
+              <article className="hiit-item" key={circuit.id}>
+                <span>{circuit.name}</span>
+                <strong>au choix</strong>
+              </article>
+            ))}
+          </div>
+        )}
       </CollapsibleSection>
 
-      <CollapsibleSection className="hiit-page" title="HIIT" summary={`${hiitRoundsToday}/${HIIT_ROUNDS} tours`}>
-        <ProtocolGrid items={trainingProtocols.hiit} title="Protocole" />
-        <div className="hiit-counter" aria-label={`Tours HIIT ${hiitRoundsToday} sur ${HIIT_ROUNDS}`}>
-          {Array.from({ length: HIIT_ROUNDS }, (_, index) => (
-            <span className={index < hiitRoundsToday ? 'done' : ''} key={index} />
-          ))}
-        </div>
-        <div className="hiit-list compact">
-          {hiitCircuit.map((exercise) => (
-            <article className="hiit-item" key={exercise.id}>
-              <span>{exercise.name}</span>
-              <strong>{formatExerciseAmount(exercise.amount, exercise.unit)}</strong>
-            </article>
-          ))}
-        </div>
-        <button className="primary-action hiit-save" disabled={hiitRoundsToday >= HIIT_ROUNDS} onClick={props.onSaveHiit}>
-          Enregistrer 1 tour
-        </button>
-      </CollapsibleSection>
+      {!isPhaseTwo && (
+        <CollapsibleSection className="hiit-page" title="HIIT" summary={`${hiitRoundsToday}/${HIIT_ROUNDS} tours`}>
+          <ProtocolGrid items={trainingProtocols.hiit} title="Protocole" />
+          <div className="hiit-counter" aria-label={`Tours HIIT ${hiitRoundsToday} sur ${HIIT_ROUNDS}`}>
+            {Array.from({ length: HIIT_ROUNDS }, (_, index) => (
+              <span className={index < hiitRoundsToday ? 'done' : ''} key={index} />
+            ))}
+          </div>
+          <div className="hiit-list compact">
+            {hiitCircuit.map((exercise) => (
+              <article className="hiit-item" key={exercise.id}>
+                <span>{exercise.name}</span>
+                <strong>{formatExerciseAmount(exercise.amount, exercise.unit)}</strong>
+              </article>
+            ))}
+          </div>
+          <button className="primary-action hiit-save" disabled={hiitRoundsToday >= HIIT_ROUNDS} onClick={props.onSaveHiit}>
+            Enregistrer 1 tour
+          </button>
+        </CollapsibleSection>
+      )}
 
       <section className="glass-panel section">
         <div className="section-title">
@@ -418,7 +509,7 @@ function HomeView(props) {
           <span>{props.currentFamily.finalGoal}</span>
         </div>
         <div className="tabs">
-          {phaseOne.families.map((family) => (
+          {props.activePhase.families.map((family) => (
             <button
               className={family.id === props.activeFamily ? 'active' : ''}
               key={family.id}
@@ -946,12 +1037,12 @@ function getTodayHiitRounds(sessions) {
   return sessions.filter((session) => session.type === 'HIIT Phase 1 - tour' && toDateKey(session.date) === today).length;
 }
 
-function getStats(state) {
-  const levelStats = getLevelStats(state.completed);
+function getStats(state, activePhase) {
+  const levelStats = getLevelStats(state.completed, activePhase);
   const totalTrainingMs = state.sessions.reduce((total, session) => total + session.durationMs, 0);
   const sessionCount = state.sessions.length;
   const longestSessionMs = Math.max(0, ...state.sessions.map((session) => session.durationMs));
-  const exerciseRows = getExerciseRows(state.sessions);
+  const exerciseRows = getExerciseRows(state.sessions, activePhase);
   const totalXp = getTotalXp(state);
 
   return {
@@ -966,8 +1057,8 @@ function getStats(state) {
   };
 }
 
-function getLevelStats(completed) {
-  const levels = phaseOne.families.flatMap((family) => family.levels);
+function getLevelStats(completed, phase = phaseOne) {
+  const levels = phase.families.flatMap((family) => family.levels);
   const required = levels.filter((level) => !level.optional);
   const optional = levels.filter((level) => level.optional);
   const completedLevels = levels.filter((level) => completed[level.id]);
@@ -981,12 +1072,13 @@ function getLevelStats(completed) {
     requiredDone,
     optionalDone,
     percent,
-    rank: getRank(requiredDone, required.length),
+    rank: getRank(requiredDone, required.length, phase),
   };
 }
 
-function getRank(done, total) {
+function getRank(done, total, phase = phaseOne) {
   const ratio = done / total;
+  if (phase.id === phaseTwo.id && ratio === 1) return 'Phase 2';
   if (ratio === 1) return 'Phase 1';
   if (ratio >= 0.75) return 'B';
   if (ratio >= 0.5) return 'C';
@@ -995,8 +1087,10 @@ function getRank(done, total) {
 }
 
 function getTotalXp(state) {
-  const levelStats = getLevelStats(state.completed);
-  const progressionXp = levelStats.requiredDone * 100 + levelStats.optionalDone * 40;
+  const progressionXp = phases.reduce((total, phase) => {
+    const levelStats = getLevelStats(state.completed, phase);
+    return total + levelStats.requiredDone * 100 + levelStats.optionalDone * 40;
+  }, 0);
   const sessionXp = state.sessions.reduce((total, session) => total + session.xp, 0);
   return progressionXp + sessionXp;
 }
@@ -1007,13 +1101,13 @@ function getSessionXp(durationMs, exercises) {
   return Math.min(240, minutes * 8 + repBonus * 2);
 }
 
-function getExerciseRows(sessions) {
+function getExerciseRows(sessions, activePhase = phaseOne) {
   const rows = new Map();
   const now = new Date();
   const weekStart = startOfWeek(now);
   const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
 
-  phaseOne.families.forEach((family) => {
+  activePhase.families.forEach((family) => {
     rows.set(family.id, { id: family.id, name: family.name, total: 0, week: 0, month: 0, unit: 'reps' });
   });
 
@@ -1129,13 +1223,21 @@ function formatExerciseAmount(amount, unit = 'reps') {
   return `${amount} reps`;
 }
 
-function getViewTitle(view) {
+function getViewTitle(view, phase = phaseOne) {
   if (view === 'timer') return 'Chronometre';
   if (view === 'hiit') return 'HIIT Phase 1';
   if (view === 'warmup') return 'Etirements';
   if (view === 'stats') return 'Statistiques';
   if (view === 'calendar') return 'Calendrier';
+  if (phase.id === phaseTwo.id) return 'Objectifs phase 2';
   return 'Objectif premier circuit complet';
+}
+
+function isPhaseComplete(phase, completed) {
+  return phase.families
+    .flatMap((family) => family.levels)
+    .filter((level) => !level.optional)
+    .every((level) => completed[level.id]);
 }
 
 function clamp(value, min, max) {
