@@ -1,9 +1,12 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { phaseOne } from './data/phase1.js';
 import './styles.css';
 
 const STORAGE_KEY = 'cali-progress-v1';
+const MIN_CIRCUIT_SESSION_MS = 10 * 60 * 1000;
+const HIIT_ROUND_MS = 2.5 * 60 * 1000;
+const HIIT_ROUNDS = 4;
 
 const defaultPlan = [
   { day: 'Lun', type: 'Circuit' },
@@ -15,7 +18,60 @@ const defaultPlan = [
   { day: 'Dim', type: '' },
 ];
 
-const planOptions = ['', 'Circuit', 'Circuit + HIIT'];
+const planOptions = ['', 'Circuit', 'HIIT'];
+const views = [
+  { id: 'home', label: 'Circuit', icon: 'home' },
+  { id: 'timer', label: 'Chrono', icon: 'timer' },
+  { id: 'warmup', label: 'Etirements', icon: 'stretch' },
+  { id: 'stats', label: 'Stats', icon: 'stats' },
+];
+
+const hiitCircuit = [
+  { id: 'burpees', name: 'Burpees', amount: 10, unit: 'reps' },
+  { id: 'bateau', name: 'Bateau', amount: 30, unit: 'sec' },
+  { id: 'jumping-jacks', name: 'Jumping jacks', amount: 50, unit: 'reps' },
+  { id: 'twists-russes', name: 'Twists russes', amount: 20, unit: 'reps' },
+  { id: 'gainage-cote', name: 'Gainage cote', amount: 30, unit: 'sec/cote' },
+  { id: 'mountain-climbers', name: 'Mountain climbers', amount: 30, unit: 'reps' },
+  { id: 'sit-up-chaise', name: 'Sit up en chaise', amount: 15, unit: 'reps' },
+];
+
+const trainingProtocols = {
+  prep: [
+    { label: 'Format', value: '4 series' },
+    { label: 'Volume', value: '2-5 reps max' },
+    { label: 'Repos', value: '5 min entre series' },
+  ],
+  classic: [
+    { label: 'Tours', value: '4 circuits' },
+    { label: 'Repos court', value: '45-60 sec' },
+    { label: 'Repos tour', value: '2 min' },
+  ],
+  hiit: [
+    { label: 'Tours', value: `${HIIT_ROUNDS} circuits` },
+    { label: 'Repos exos', value: '15-20 sec' },
+    { label: 'Repos tour', value: '1 min' },
+  ],
+};
+
+const warmupSets = {
+  stretch: {
+    label: 'Etirements',
+    exerciseSeconds: 30,
+    restSeconds: 5,
+    exercises: [
+      'Tendu sur la barre de traction',
+      'Etirements pectoraux - bras gauche',
+      'Etirements pectoraux - bras droit',
+      'Etirements obliques - cote gauche',
+      'Etirements obliques - cote droit',
+      'Etirements abdos',
+      'Toucher le bout de ses pieds assis',
+      'Jambe pliee tenue derriere les fesses - gauche',
+      'Jambe pliee tenue derriere les fesses - droite',
+    ],
+  },
+};
 
 function loadState() {
   try {
@@ -24,10 +80,16 @@ function loadState() {
       completed: saved?.completed ?? {},
       circuitNotes: saved?.circuitNotes ?? {},
       plan: normalizePlan(saved?.plan),
+      sessions: Array.isArray(saved?.sessions) ? saved.sessions : [],
+      records: saved?.records ?? {},
     };
   } catch {
-    return { completed: {}, circuitNotes: {}, plan: defaultPlan };
+    return getDefaultState();
   }
+}
+
+function getDefaultState() {
+  return { completed: {}, circuitNotes: {}, plan: defaultPlan, sessions: [], records: {} };
 }
 
 function normalizePlan(savedPlan) {
@@ -46,6 +108,7 @@ function normalizePlan(savedPlan) {
 
 function normalizePlanType(type) {
   if (type === 'Circuit Phase 1' || type === 'Progression technique') return 'Circuit';
+  if (type === 'Circuit + HIIT') return 'HIIT';
   return '';
 }
 
@@ -55,13 +118,27 @@ function saveState(nextState) {
 
 function App() {
   const [state, setState] = useState(loadState);
+  const [activeView, setActiveView] = useState('home');
   const [activeFamily, setActiveFamily] = useState(phaseOne.families[0].id);
+  const [summary, setSummary] = useState(null);
+  const [stopwatchMessage, setStopwatchMessage] = useState('');
+  const [stopwatchReps, setStopwatchReps] = useState({});
+  const [stopwatch, setStopwatch] = useState(createClockState);
+  const [warmup, setWarmup] = useState(createWarmupState);
 
-  const stats = useMemo(() => getStats(state.completed), [state.completed]);
+  useClockTicker(stopwatch, setStopwatch);
+  useWarmupTicker(warmup, setWarmup);
+
+  useEffect(() => {
+    if (!warmup.completedSession) return;
+    recordWarmupSession(warmup.completedSession);
+  }, [warmup.completedSession]);
+
+  const stats = useMemo(() => getStats(state), [state]);
   const currentFamily = phaseOne.families.find((family) => family.id === activeFamily);
   const circuitGoals = phaseOne.families.map((family) => ({
     family,
-    level: family.levels.find((level) => !state.completed[level.id]),
+    level: getCurrentLevel(family, state.completed),
   }));
 
   function updateState(updater) {
@@ -98,14 +175,109 @@ function App() {
     }));
   }
 
-  function updateCircuitNote(familyId, value) {
-    updateState((previous) => ({
+  function recordSession(session) {
+    let recordedSummary;
+    updateState((previous) => {
+      const nextSession = {
+        id: crypto.randomUUID(),
+        date: new Date().toISOString(),
+        ...session,
+      };
+      const recordResult = updateRecords(previous.records, nextSession.exercises);
+      recordedSummary = {
+        ...nextSession,
+        newRecords: recordResult.newRecords,
+        previousXp: getTotalXp(previous),
+        nextXp: getTotalXp({ ...previous, sessions: [...previous.sessions, nextSession] }),
+      };
+
+      return {
+        ...previous,
+        sessions: [nextSession, ...previous.sessions],
+        records: recordResult.records,
+      };
+    });
+    setSummary(recordedSummary);
+  }
+
+  function getStopwatchExercises() {
+    const exercises = phaseOne.families
+      .map((family) => ({
+        id: family.id,
+        name: family.name,
+        reps: Number(stopwatchReps[family.id]) || 0,
+      }))
+      .filter((exercise) => exercise.reps > 0);
+
+    return exercises;
+  }
+
+  function updateStopwatchReps(familyId, value) {
+    const reps = Math.max(0, Number(value) || 0);
+    setStopwatchReps((previous) => ({ ...previous, [familyId]: reps }));
+  }
+
+  function bumpStopwatchReps(familyId, amount) {
+    setStopwatchReps((previous) => ({
       ...previous,
-      circuitNotes: {
-        ...previous.circuitNotes,
-        [familyId]: value,
-      },
+      [familyId]: Math.max(0, (Number(previous[familyId]) || 0) + amount),
     }));
+  }
+
+  function recordStopwatchSession() {
+    const durationMs = getClockElapsed(stopwatch);
+    if (durationMs < MIN_CIRCUIT_SESSION_MS) {
+      return;
+    }
+
+    const exercises = getStopwatchExercises();
+
+    recordSession({
+      type: 'Circuit',
+      durationMs,
+      exercises,
+      totalReps: exercises.reduce((total, exercise) => total + exercise.reps, 0),
+      xp: getSessionXp(durationMs, exercises),
+    });
+    setStopwatch(createClockState());
+    setStopwatchReps({});
+    setStopwatchMessage('');
+  }
+
+  function recordHiitSession() {
+    const exercises = hiitCircuit.map((exercise) => ({
+      id: `hiit-${exercise.id}`,
+      name: exercise.name,
+      reps: exercise.amount,
+      unit: exercise.unit,
+    }));
+
+    recordSession({
+      type: 'HIIT Phase 1 - tour',
+      durationMs: HIIT_ROUND_MS,
+      exercises,
+      totalReps: exercises
+        .filter((exercise) => exercise.unit === 'reps')
+        .reduce((total, exercise) => total + exercise.reps, 0),
+      xp: getSessionXp(HIIT_ROUND_MS, exercises),
+    });
+  }
+
+  function recordWarmupSession(finalWarmup) {
+    const set = warmupSets[finalWarmup.mode];
+    const completedExercises = set.exercises.slice(0, finalWarmup.index + 1);
+    const durationMs =
+      completedExercises.length * set.exerciseSeconds * 1000 +
+      Math.max(0, completedExercises.length - 1) * set.restSeconds * 1000;
+
+    recordSession({
+      type: set.label,
+      durationMs,
+      exercises: completedExercises.map((name) => ({ id: slugify(name), name, reps: 1 })),
+      totalReps: completedExercises.length,
+      xp: getSessionXp(durationMs, completedExercises),
+    });
+    setWarmup(createWarmupState());
   }
 
   return (
@@ -113,13 +285,27 @@ function App() {
       <section className="hero">
         <div>
           <p className="eyebrow">{phaseOne.name}</p>
-          <h1>Objectif premier circuit complet</h1>
+          <h1>{getViewTitle(activeView)}</h1>
         </div>
         <div className="rank-box">
           <span>Rang</span>
           <strong>{stats.rank}</strong>
         </div>
       </section>
+
+      <nav className="app-nav" aria-label="Navigation principale">
+        {views.map((view) => (
+          <button
+            aria-label={view.label}
+            className={activeView === view.id ? 'nav-icon active' : 'nav-icon'}
+            key={view.id}
+            onClick={() => setActiveView(view.id)}
+            title={view.label}
+          >
+            <Icon name={view.icon} />
+          </button>
+        ))}
+      </nav>
 
       <section className="glass-panel progress-panel">
         <div>
@@ -129,18 +315,57 @@ function App() {
         <div className="progress-track" aria-label={`Progression ${stats.percent}%`}>
           <span style={{ width: `${stats.percent}%` }} />
         </div>
-        <p>{stats.xp} XP / {stats.requiredDone} niveaux principaux / {stats.optionalDone} optionnels</p>
+        <p>{stats.totalXp} XP / {stats.requiredDone} niveaux principaux / {stats.optionalDone} optionnels</p>
       </section>
 
+      {activeView === 'home' && (
+        <HomeView
+          activeFamily={activeFamily}
+          circuitGoals={circuitGoals}
+          currentFamily={currentFamily}
+          onLevelToggle={toggleLevel}
+          onPlanChange={updatePlan}
+          onSelectFamily={setActiveFamily}
+          onSaveHiit={recordHiitSession}
+          plan={state.plan}
+          completed={state.completed}
+          sessions={state.sessions}
+        />
+      )}
+      {activeView === 'timer' && (
+        <StopwatchView
+          clock={stopwatch}
+          circuitGoals={circuitGoals}
+          message={stopwatchMessage}
+          onClockChange={setStopwatch}
+          onRepsChange={updateStopwatchReps}
+          onRepsStep={bumpStopwatchReps}
+          onSave={recordStopwatchSession}
+          reps={stopwatchReps}
+        />
+      )}
+      {activeView === 'warmup' && <WarmupView warmup={warmup} onWarmupChange={setWarmup} />}
+      {activeView === 'stats' && <StatsView stats={stats} records={state.records} sessions={state.sessions} />}
+
+      {summary && <SessionSummary summary={summary} onClose={() => setSummary(null)} />}
+    </main>
+  );
+}
+
+function HomeView(props) {
+  const hiitRoundsToday = getTodayHiitRounds(props.sessions);
+
+  return (
+    <>
       <section className="glass-panel section">
         <div className="section-title">
           <h2>Planning</h2>
         </div>
         <div className="week-grid">
-          {state.plan.map((slot, index) => (
+          {props.plan.map((slot, index) => (
             <label className={slot.type ? 'day-card filled' : 'day-card'} key={slot.day}>
               <span>{slot.day}</span>
-              <select value={slot.type} onChange={(event) => updatePlan(index, event.target.value)}>
+              <select value={slot.type} onChange={(event) => props.onPlanChange(index, event.target.value)}>
                 {planOptions.map((option) => (
                   <option value={option} key={option}>
                     {option || 'Vide'}
@@ -152,55 +377,65 @@ function App() {
         </div>
       </section>
 
-      <section className="glass-panel section">
-        <div className="section-title">
-          <h2>Circuit</h2>
-          <span>prochaine cible et reps</span>
-        </div>
+      <CollapsibleSection title="Seance circuit" summary="prochaine cible" defaultOpen>
+        <ProtocolGrid items={trainingProtocols.prep} title="Pre-entrainement" />
+        <ProtocolGrid items={trainingProtocols.classic} title="Circuit classique" />
         <div className="circuit-list">
-          {circuitGoals.map(({ family, level }) => (
+          {props.circuitGoals.map(({ family, level }) => (
             <article className="circuit-item" key={family.id}>
-              <button className="circuit-target" onClick={() => setActiveFamily(family.id)}>
+              <button className="circuit-target" onClick={() => props.onSelectFamily(family.id)}>
                 <span>{family.name}</span>
-                <strong>{level ? level.name : 'Maitrise'}</strong>
+                <strong>{level.name}</strong>
               </button>
-              <label>
-                <span>Mes reps</span>
-                <input
-                  value={state.circuitNotes[family.id] ?? ''}
-                  onChange={(event) => updateCircuitNote(family.id, event.target.value)}
-                  placeholder="ex: 3x5 propres, 2 negatives lentes"
-                />
-              </label>
             </article>
           ))}
         </div>
-      </section>
+      </CollapsibleSection>
+
+      <CollapsibleSection className="hiit-page" title="HIIT" summary={`${hiitRoundsToday}/${HIIT_ROUNDS} tours`}>
+        <ProtocolGrid items={trainingProtocols.hiit} title="Protocole" />
+        <div className="hiit-counter" aria-label={`Tours HIIT ${hiitRoundsToday} sur ${HIIT_ROUNDS}`}>
+          {Array.from({ length: HIIT_ROUNDS }, (_, index) => (
+            <span className={index < hiitRoundsToday ? 'done' : ''} key={index} />
+          ))}
+        </div>
+        <div className="hiit-list compact">
+          {hiitCircuit.map((exercise) => (
+            <article className="hiit-item" key={exercise.id}>
+              <span>{exercise.name}</span>
+              <strong>{formatExerciseAmount(exercise.amount, exercise.unit)}</strong>
+            </article>
+          ))}
+        </div>
+        <button className="primary-action hiit-save" disabled={hiitRoundsToday >= HIIT_ROUNDS} onClick={props.onSaveHiit}>
+          Enregistrer 1 tour
+        </button>
+      </CollapsibleSection>
 
       <section className="glass-panel section">
         <div className="section-title">
           <h2>Objectifs</h2>
-          <span>{currentFamily.finalGoal}</span>
+          <span>{props.currentFamily.finalGoal}</span>
         </div>
         <div className="tabs">
           {phaseOne.families.map((family) => (
             <button
-              className={family.id === activeFamily ? 'active' : ''}
+              className={family.id === props.activeFamily ? 'active' : ''}
               key={family.id}
-              onClick={() => setActiveFamily(family.id)}
+              onClick={() => props.onSelectFamily(family.id)}
             >
               {family.name}
             </button>
           ))}
         </div>
         <div className="levels">
-          {currentFamily.levels.map((level) => (
-            <article className={state.completed[level.id] ? 'level-card done' : 'level-card'} key={level.id}>
+          {props.currentFamily.levels.map((level) => (
+            <article className={props.completed[level.id] ? 'level-card done' : 'level-card'} key={level.id}>
               <label>
                 <input
                   type="checkbox"
-                  checked={Boolean(state.completed[level.id])}
-                  onChange={() => toggleLevel(currentFamily.id, level.id)}
+                  checked={Boolean(props.completed[level.id])}
+                  onChange={() => props.onLevelToggle(props.currentFamily.id, level.id)}
                 />
                 <span>
                   {level.name}
@@ -212,11 +447,526 @@ function App() {
           ))}
         </div>
       </section>
-    </main>
+    </>
   );
 }
 
-function getStats(completed) {
+function StopwatchView({ clock, circuitGoals, message, onClockChange, onRepsChange, onRepsStep, onSave, reps }) {
+  const [activeRepFamily, setActiveRepFamily] = useState(circuitGoals[0]?.family.id);
+  const elapsedMs = getClockElapsed(clock);
+  const isPausedWithTime = !clock.running && elapsedMs > 0;
+  const canSave = elapsedMs >= MIN_CIRCUIT_SESSION_MS;
+  const activeGoal = circuitGoals.find(({ family }) => family.id === activeRepFamily) ?? circuitGoals[0];
+  const totalReps = Object.values(reps).reduce((total, value) => total + (Number(value) || 0), 0);
+
+  return (
+    <section className="glass-panel section timer-page">
+      <div className="timer-display">{formatDuration(elapsedMs)}</div>
+      <div className="stopwatch-actions">
+        {clock.running ? (
+          <button aria-label="Pause" className="round-action" onClick={() => onClockChange(pauseClock(clock))}>
+            <Icon name="pause" />
+          </button>
+        ) : (
+          <button aria-label="Lecture" className="round-action" onClick={() => onClockChange(startClock(clock))}>
+            <Icon name="play" />
+          </button>
+        )}
+        {isPausedWithTime && (
+          <>
+            <button aria-label="Reinitialiser" className="icon-action" onClick={() => onClockChange(createClockState())}>
+              <Icon name="reset" />
+            </button>
+            <button className="primary-action save-action" disabled={!canSave} onClick={onSave}>
+              Enregistrer
+            </button>
+          </>
+        )}
+      </div>
+      {message && <p className="session-rule warning">{message}</p>}
+      <div className="session-reps">
+        <div className="rep-tabs" aria-label="Exercices de la seance">
+          {circuitGoals.map(({ family }) => (
+            <button
+              className={activeGoal?.family.id === family.id ? 'active' : ''}
+              key={family.id}
+              onClick={() => setActiveRepFamily(family.id)}
+            >
+              <span>{family.name}</span>
+              <strong>{reps[family.id] ?? 0}</strong>
+            </button>
+          ))}
+        </div>
+        {activeGoal && (
+          <article className="rep-tracker">
+            <div>
+              <span>{activeGoal.family.name}</span>
+              <strong>{activeGoal.level.name}</strong>
+            </div>
+            <div className="rep-controls">
+              <button aria-label={`Retirer une rep ${activeGoal.family.name}`} onClick={() => onRepsStep(activeGoal.family.id, -1)}>
+                -1
+              </button>
+              <input
+                aria-label={`Repetitions ${activeGoal.family.name}`}
+                inputMode="numeric"
+                min="0"
+                type="number"
+                value={reps[activeGoal.family.id] ?? 0}
+                onChange={(event) => onRepsChange(activeGoal.family.id, event.target.value)}
+              />
+              <button aria-label={`Ajouter une rep ${activeGoal.family.name}`} onClick={() => onRepsStep(activeGoal.family.id, 1)}>
+                +1
+              </button>
+              <button aria-label={`Ajouter cinq reps ${activeGoal.family.name}`} onClick={() => onRepsStep(activeGoal.family.id, 5)}>
+                +5
+              </button>
+            </div>
+          </article>
+        )}
+        <p className="rep-total">{totalReps} reps notees</p>
+      </div>
+    </section>
+  );
+}
+
+function ProtocolGrid({ items, title }) {
+  return (
+    <div className="protocol-block">
+      <span>{title}</span>
+      <div className="protocol-grid">
+        {items.map((item) => (
+          <article key={item.label}>
+            <small>{item.label}</small>
+            <strong>{item.value}</strong>
+          </article>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function CollapsibleSection({ children, className = '', defaultOpen = false, summary, title }) {
+  const [open, setOpen] = useState(defaultOpen);
+
+  return (
+    <section className={`glass-panel section collapsible-section ${className}`}>
+      <button
+        aria-expanded={open}
+        className="collapse-toggle"
+        onClick={() => setOpen((previous) => !previous)}
+      >
+        <span>
+          <strong>{title}</strong>
+          {summary && <small>{summary}</small>}
+        </span>
+        <Icon name={open ? 'chevron-up' : 'chevron-down'} />
+      </button>
+      {open && <div className="collapsible-content">{children}</div>}
+    </section>
+  );
+}
+
+function WarmupView({ warmup, onWarmupChange }) {
+  const set = warmupSets[warmup.mode];
+  const currentName = set.exercises[warmup.index];
+  const nextName = set.exercises[warmup.index + 1] ?? 'fin de seance';
+  const totalSteps = set.exercises.length;
+  const seconds = warmup.phase === 'exercise' ? set.exerciseSeconds : set.restSeconds;
+  const progress = ((warmup.index + (warmup.phase === 'rest' ? 0.5 : 0)) / totalSteps) * 100;
+
+  function skip(direction) {
+    onWarmupChange((previous) => ({
+      ...previous,
+      index: clamp(previous.index + direction, 0, warmupSets[previous.mode].exercises.length - 1),
+      phase: 'exercise',
+      remainingMs: warmupSets[previous.mode].exerciseSeconds * 1000,
+      updatedAt: Date.now(),
+    }));
+  }
+
+  return (
+    <section className="glass-panel section warmup-page">
+      <div className="warmup-card">
+        <span>{warmup.phase === 'exercise' ? 'Exercice' : 'Repos'}</span>
+        <h2>{warmup.phase === 'exercise' ? currentName : `prochain : ${nextName}`}</h2>
+        <strong>{formatTimerSeconds(Math.ceil(warmup.remainingMs / 1000 || seconds))}</strong>
+      </div>
+      <div className="control-row">
+        <button aria-label="Precedent" title="Precedent" onClick={() => skip(-1)}>
+          <Icon name="previous" />
+        </button>
+        {warmup.running ? (
+          <button aria-label="Pause" title="Pause" onClick={() => onWarmupChange((previous) => ({ ...previous, running: false }))}>
+            <Icon name="pause" />
+          </button>
+        ) : (
+          <button
+            aria-label="Lecture"
+            title="Lecture"
+            onClick={() => onWarmupChange((previous) => ({ ...previous, running: true, updatedAt: Date.now() }))}
+          >
+            <Icon name="play" />
+          </button>
+        )}
+        <button aria-label="Suivant" title="Suivant" onClick={() => skip(1)}>
+          <Icon name="next" />
+        </button>
+      </div>
+      <div className="step-dots" aria-label={`Progression ${Math.round(progress)}%`}>
+        {set.exercises.map((exercise, index) => (
+          <span className={index <= warmup.index ? 'active' : ''} title={exercise} key={exercise} />
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function StatsView({ stats, records, sessions }) {
+  return (
+    <>
+      <section className="stats-grid">
+        <StatCard label="Temps total" value={formatDuration(stats.totalTrainingMs)} />
+        <StatCard label="Seances" value={stats.sessionCount} />
+        <StatCard label="Moyenne" value={formatDuration(stats.averageSessionMs)} />
+        <StatCard label="Plus longue" value={formatDuration(stats.longestSessionMs)} />
+      </section>
+      <section className="glass-panel section">
+        <div className="section-title">
+          <h2>Progression</h2>
+        </div>
+        <div className="chart-bars">
+          {stats.weekBuckets.map((bucket) => (
+            <div className="chart-column" key={bucket.label}>
+              <span style={{ height: `${Math.max(8, bucket.percent)}%` }} />
+              <small>{bucket.label}</small>
+            </div>
+          ))}
+        </div>
+      </section>
+      <CalendarView sessions={sessions} />
+      <CollapsibleSection title="Exercices" summary={`${stats.exerciseRows.length} suivis`}>
+        <div className="exercise-stats">
+          {stats.exerciseRows.map((row) => (
+            <article key={row.id}>
+              <strong>{row.name}</strong>
+              <span>Total {formatExerciseAmount(row.total, row.unit)}</span>
+              <span>Semaine {formatExerciseAmount(row.week, row.unit)}</span>
+              <span>Mois {formatExerciseAmount(row.month, row.unit)}</span>
+              <em>Record {formatExerciseAmount(records[row.id] ?? 0, row.unit)}</em>
+            </article>
+          ))}
+        </div>
+      </CollapsibleSection>
+    </>
+  );
+}
+
+function CalendarView({ sessions }) {
+  const [selectedDate, setSelectedDate] = useState(toDateKey(new Date()));
+  const calendar = getCurrentMonthCalendar(sessions);
+  const selectedSessions = sessions.filter((session) => toDateKey(session.date) === selectedDate);
+
+  return (
+    <>
+      <section className="glass-panel section">
+        <div className="section-title">
+          <h2>Historique</h2>
+          <span>{calendar.monthLabel}</span>
+        </div>
+        <div className="calendar-grid">
+          {calendar.days.map((day) => (
+            <button
+              className={`${day.inMonth ? '' : 'muted-day'} ${day.hasSession ? 'trained' : ''} ${day.key === selectedDate ? 'selected' : ''}`}
+              key={day.key}
+              onClick={() => setSelectedDate(day.key)}
+            >
+              {day.label}
+            </button>
+          ))}
+        </div>
+      </section>
+      <CollapsibleSection title={formatHumanDate(selectedDate)} summary={`${selectedSessions.length} seance(s)`} defaultOpen>
+        <div className="section-title">
+          <h2>Detail</h2>
+          <span>{selectedSessions.length} seance(s)</span>
+        </div>
+        <div className="history-list">
+          {selectedSessions.length === 0 && <p className="empty-state">Aucune seance enregistree ce jour.</p>}
+          {selectedSessions.map((session) => (
+            <article key={session.id}>
+              <strong>{session.type} - {formatDuration(session.durationMs)}</strong>
+              <span>{session.totalReps} reps - {session.xp} XP</span>
+              <p>{session.exercises.map((exercise) => `${exercise.name}: ${formatExerciseAmount(exercise.reps, exercise.unit)}`).join(' / ') || 'Chronometre libre'}</p>
+            </article>
+          ))}
+        </div>
+      </CollapsibleSection>
+    </>
+  );
+}
+
+function SessionSummary({ summary, onClose }) {
+  const levelBefore = Math.floor(summary.previousXp / 500);
+  const nextPercent = ((summary.nextXp % 500) / 500) * 100;
+
+  return (
+    <div className="summary-backdrop" role="dialog" aria-modal="true">
+      <section className="summary-card">
+        <p className="eyebrow">Seance terminee</p>
+        <h2>{summary.type}</h2>
+        <div className="summary-grid">
+          <StatCard label="Temps" value={formatDuration(summary.durationMs)} />
+          <StatCard label="XP gagnee" value={`+${summary.xp}`} />
+          <StatCard label="Repetitions" value={summary.totalReps} />
+          <StatCard label="Records" value={summary.newRecords.length} />
+        </div>
+        <div className="xp-result">
+          <span>Niveau {levelBefore + 1}</span>
+          <div className="progress-track">
+            <span style={{ width: `${nextPercent}%` }} />
+          </div>
+          <small>{summary.nextXp} XP au total</small>
+        </div>
+        {summary.newRecords.length > 0 && (
+          <div className="record-list">
+            {summary.newRecords.map((record) => (
+              <span key={record.id}>Nouveau record: {record.name} {formatExerciseAmount(record.reps, record.unit)}</span>
+            ))}
+          </div>
+        )}
+        <button className="primary-action" onClick={onClose}>Valider</button>
+      </section>
+    </div>
+  );
+}
+
+function StatCard({ label, value }) {
+  return (
+    <article className="stat-card">
+      <span>{label}</span>
+      <strong>{value}</strong>
+    </article>
+  );
+}
+
+function Icon({ name }) {
+  const common = {
+    'aria-hidden': 'true',
+    fill: 'none',
+    stroke: 'currentColor',
+    strokeLinecap: 'round',
+    strokeLinejoin: 'round',
+    strokeWidth: 2,
+    viewBox: '0 0 24 24',
+  };
+
+  if (name === 'home') {
+    return (
+      <svg {...common}>
+        <path d="M3 10.5 12 3l9 7.5" />
+        <path d="M5 10v10h14V10" />
+        <path d="M9 20v-6h6v6" />
+      </svg>
+    );
+  }
+  if (name === 'timer') {
+    return (
+      <svg {...common}>
+        <path d="M9 2h6" />
+        <path d="M12 14l3-3" />
+        <path d="M12 6a8 8 0 1 0 0 16 8 8 0 0 0 0-16Z" />
+      </svg>
+    );
+  }
+  if (name === 'hiit') {
+    return (
+      <svg {...common}>
+        <path d="m13 2-8 12h6l-1 8 9-13h-6l1-7Z" />
+      </svg>
+    );
+  }
+  if (name === 'stretch') {
+    return (
+      <svg {...common}>
+        <path d="M7 4.5a2.5 2.5 0 1 0 5 0 2.5 2.5 0 0 0-5 0Z" />
+        <path d="M10 9l3.5 2.5L18 10" />
+        <path d="M13.5 11.5 11 16l-5 4" />
+        <path d="M12 16h5l3 4" />
+      </svg>
+    );
+  }
+  if (name === 'stats') {
+    return (
+      <svg {...common}>
+        <path d="M4 19V5" />
+        <path d="M4 19h16" />
+        <path d="M8 16v-5" />
+        <path d="M12 16V8" />
+        <path d="M16 16v-9" />
+      </svg>
+    );
+  }
+  if (name === 'calendar') {
+    return (
+      <svg {...common}>
+        <path d="M7 3v3" />
+        <path d="M17 3v3" />
+        <path d="M4 8h16" />
+        <path d="M5 5h14a1 1 0 0 1 1 1v13a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a1 1 0 0 1 1-1Z" />
+      </svg>
+    );
+  }
+  if (name === 'play') {
+    return (
+      <svg {...common} fill="currentColor" stroke="none">
+        <path d="M8 5.2v13.6c0 .8.9 1.3 1.6.8l9.8-6.8c.6-.4.6-1.2 0-1.6L9.6 4.4C8.9 3.9 8 4.4 8 5.2Z" />
+      </svg>
+    );
+  }
+  if (name === 'pause') {
+    return (
+      <svg {...common} fill="currentColor" stroke="none">
+        <path d="M8 5h3v14H8z" />
+        <path d="M13 5h3v14h-3z" />
+      </svg>
+    );
+  }
+  if (name === 'previous') {
+    return (
+      <svg {...common}>
+        <path d="m11 17-5-5 5-5" />
+        <path d="m18 17-5-5 5-5" />
+      </svg>
+    );
+  }
+  if (name === 'next') {
+    return (
+      <svg {...common}>
+        <path d="m6 17 5-5-5-5" />
+        <path d="m13 17 5-5-5-5" />
+      </svg>
+    );
+  }
+  if (name === 'chevron-up') {
+    return (
+      <svg {...common}>
+        <path d="m6 15 6-6 6 6" />
+      </svg>
+    );
+  }
+  if (name === 'chevron-down') {
+    return (
+      <svg {...common}>
+        <path d="m6 9 6 6 6-6" />
+      </svg>
+    );
+  }
+  return (
+    <svg {...common}>
+      <path d="M4 4v6h6" />
+      <path d="M20 12a8 8 0 0 1-14.9 4" />
+      <path d="M5 10a8 8 0 0 1 14.9-4" />
+    </svg>
+  );
+}
+
+function useClockTicker(clock, setClock) {
+  useEffect(() => {
+    if (!clock.running) return undefined;
+    const interval = setInterval(() => {
+      setClock((previous) => (previous.running ? { ...previous, now: Date.now() } : previous));
+    }, 250);
+    return () => clearInterval(interval);
+  }, [clock.running, setClock]);
+}
+
+function useWarmupTicker(warmup, setWarmup) {
+  useEffect(() => {
+    if (!warmup.running) return undefined;
+    const interval = setInterval(() => {
+      setWarmup((previous) => {
+        if (!previous.running) return previous;
+        const now = Date.now();
+        const nextRemaining = previous.remainingMs - (now - previous.updatedAt);
+        if (nextRemaining > 0) return { ...previous, remainingMs: nextRemaining, updatedAt: now };
+
+        const set = warmupSets[previous.mode];
+        if (previous.phase === 'exercise') {
+          return { ...previous, phase: 'rest', remainingMs: set.restSeconds * 1000, updatedAt: now };
+        }
+        if (previous.index >= set.exercises.length - 1) {
+          return { ...previous, running: false, completedSession: previous };
+        }
+        return { ...previous, index: previous.index + 1, phase: 'exercise', remainingMs: set.exerciseSeconds * 1000, updatedAt: now };
+      });
+    }, 250);
+    return () => clearInterval(interval);
+  }, [warmup.running, setWarmup]);
+}
+
+function createClockState() {
+  return { elapsedMs: 0, running: false, startedAt: null, now: Date.now() };
+}
+
+function createWarmupState(mode = 'stretch') {
+  const set = warmupSets[mode];
+  return {
+    mode,
+    index: 0,
+    phase: 'exercise',
+    remainingMs: set.exerciseSeconds * 1000,
+    running: false,
+    updatedAt: Date.now(),
+    completedSession: null,
+  };
+}
+
+function startClock(clock) {
+  if (clock.running) return clock;
+  return { ...clock, running: true, startedAt: Date.now(), now: Date.now() };
+}
+
+function pauseClock(clock) {
+  if (!clock.running) return clock;
+  return { ...clock, running: false, elapsedMs: getClockElapsed(clock), startedAt: null };
+}
+
+function getClockElapsed(clock) {
+  if (!clock.running || !clock.startedAt) return clock.elapsedMs;
+  return clock.elapsedMs + (clock.now - clock.startedAt);
+}
+
+function getCurrentLevel(family, completed) {
+  return family.levels.find((level) => !completed[level.id]) ?? family.levels[family.levels.length - 1];
+}
+
+function getTodayHiitRounds(sessions) {
+  const today = toDateKey(new Date());
+  return sessions.filter((session) => session.type === 'HIIT Phase 1 - tour' && toDateKey(session.date) === today).length;
+}
+
+function getStats(state) {
+  const levelStats = getLevelStats(state.completed);
+  const totalTrainingMs = state.sessions.reduce((total, session) => total + session.durationMs, 0);
+  const sessionCount = state.sessions.length;
+  const longestSessionMs = Math.max(0, ...state.sessions.map((session) => session.durationMs));
+  const exerciseRows = getExerciseRows(state.sessions);
+  const totalXp = getTotalXp(state);
+
+  return {
+    ...levelStats,
+    totalXp,
+    totalTrainingMs,
+    sessionCount,
+    averageSessionMs: sessionCount ? totalTrainingMs / sessionCount : 0,
+    longestSessionMs,
+    exerciseRows,
+    weekBuckets: getWeekBuckets(state.sessions),
+  };
+}
+
+function getLevelStats(completed) {
   const levels = phaseOne.families.flatMap((family) => family.levels);
   const required = levels.filter((level) => !level.optional);
   const optional = levels.filter((level) => level.optional);
@@ -224,7 +974,6 @@ function getStats(completed) {
   const requiredDone = required.filter((level) => completed[level.id]).length;
   const optionalDone = optional.filter((level) => completed[level.id]).length;
   const percent = Math.round((completedLevels.length / levels.length) * 100);
-  const xp = requiredDone * 100 + optionalDone * 40;
 
   return {
     completedDone: completedLevels.length,
@@ -232,7 +981,6 @@ function getStats(completed) {
     requiredDone,
     optionalDone,
     percent,
-    xp,
     rank: getRank(requiredDone, required.length),
   };
 }
@@ -244,6 +992,158 @@ function getRank(done, total) {
   if (ratio >= 0.5) return 'C';
   if (ratio >= 0.25) return 'D';
   return 'E';
+}
+
+function getTotalXp(state) {
+  const levelStats = getLevelStats(state.completed);
+  const progressionXp = levelStats.requiredDone * 100 + levelStats.optionalDone * 40;
+  const sessionXp = state.sessions.reduce((total, session) => total + session.xp, 0);
+  return progressionXp + sessionXp;
+}
+
+function getSessionXp(durationMs, exercises) {
+  const minutes = Math.max(1, Math.round(durationMs / 60000));
+  const repBonus = exercises.reduce((total, exercise) => total + (exercise.reps || 0), 0);
+  return Math.min(240, minutes * 8 + repBonus * 2);
+}
+
+function getExerciseRows(sessions) {
+  const rows = new Map();
+  const now = new Date();
+  const weekStart = startOfWeek(now);
+  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+
+  phaseOne.families.forEach((family) => {
+    rows.set(family.id, { id: family.id, name: family.name, total: 0, week: 0, month: 0, unit: 'reps' });
+  });
+
+  sessions.forEach((session) => {
+    const date = new Date(session.date);
+    session.exercises.forEach((exercise) => {
+      const row = rows.get(exercise.id) ?? { id: exercise.id, name: exercise.name, total: 0, week: 0, month: 0, unit: exercise.unit ?? 'reps' };
+      row.total += exercise.reps || 0;
+      if (date >= weekStart) row.week += exercise.reps || 0;
+      if (date >= monthStart) row.month += exercise.reps || 0;
+      row.unit = exercise.unit ?? row.unit ?? 'reps';
+      rows.set(exercise.id, row);
+    });
+  });
+
+  return Array.from(rows.values());
+}
+
+function getWeekBuckets(sessions) {
+  const days = ['Lun', 'Mar', 'Mer', 'Jeu', 'Ven', 'Sam', 'Dim'];
+  const weekStart = startOfWeek(new Date());
+  const buckets = days.map((label, index) => {
+    const key = toDateKey(new Date(weekStart.getFullYear(), weekStart.getMonth(), weekStart.getDate() + index));
+    const minutes = sessions
+      .filter((session) => toDateKey(session.date) === key)
+      .reduce((total, session) => total + session.durationMs / 60000, 0);
+    return { label, minutes };
+  });
+  const max = Math.max(1, ...buckets.map((bucket) => bucket.minutes));
+  return buckets.map((bucket) => ({ ...bucket, percent: (bucket.minutes / max) * 100 }));
+}
+
+function updateRecords(records, exercises) {
+  const next = { ...records };
+  const newRecords = [];
+
+  exercises.forEach((exercise) => {
+    if ((exercise.reps || 0) > (next[exercise.id] || 0)) {
+      next[exercise.id] = exercise.reps;
+      newRecords.push(exercise);
+    }
+  });
+
+  return { records: next, newRecords };
+}
+
+function parseReps(value) {
+  if (!value) return 0;
+  let total = 0;
+  const text = String(value).toLowerCase().replace(/(\d+)\s*x\s*(\d+)/g, (_, sets, reps) => {
+    total += Number(sets) * Number(reps);
+    return ' ';
+  });
+  return total + [...text.matchAll(/\d+/g)].reduce((sum, match) => sum + Number(match[0]), 0);
+}
+
+function getCurrentMonthCalendar(sessions) {
+  const now = new Date();
+  const first = new Date(now.getFullYear(), now.getMonth(), 1);
+  const startOffset = (first.getDay() + 6) % 7;
+  const start = new Date(now.getFullYear(), now.getMonth(), 1 - startOffset);
+  const trainedDays = new Set(sessions.map((session) => toDateKey(session.date)));
+
+  return {
+    monthLabel: first.toLocaleDateString('fr-FR', { month: 'long', year: 'numeric' }),
+    days: Array.from({ length: 42 }, (_, index) => {
+      const date = new Date(start.getFullYear(), start.getMonth(), start.getDate() + index);
+      const key = toDateKey(date);
+      return {
+        key,
+        label: date.getDate(),
+        inMonth: date.getMonth() === now.getMonth(),
+        hasSession: trainedDays.has(key),
+      };
+    }),
+  };
+}
+
+function startOfWeek(date) {
+  const copy = new Date(date);
+  const day = (copy.getDay() + 6) % 7;
+  copy.setHours(0, 0, 0, 0);
+  copy.setDate(copy.getDate() - day);
+  return copy;
+}
+
+function toDateKey(dateLike) {
+  const date = new Date(dateLike);
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+}
+
+function formatHumanDate(key) {
+  return new Date(`${key}T12:00:00`).toLocaleDateString('fr-FR', { day: 'numeric', month: 'long' });
+}
+
+function formatDuration(ms) {
+  const totalSeconds = Math.max(0, Math.floor(ms / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  return hours > 0
+    ? `${hours}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`
+    : `${minutes}:${String(seconds).padStart(2, '0')}`;
+}
+
+function formatTimerSeconds(seconds) {
+  return `0:${String(seconds).padStart(2, '0')}`;
+}
+
+function formatExerciseAmount(amount, unit = 'reps') {
+  if (unit === 'sec') return `${amount} sec`;
+  if (unit === 'sec/cote') return `${amount} sec / cote`;
+  return `${amount} reps`;
+}
+
+function getViewTitle(view) {
+  if (view === 'timer') return 'Chronometre';
+  if (view === 'hiit') return 'HIIT Phase 1';
+  if (view === 'warmup') return 'Etirements';
+  if (view === 'stats') return 'Statistiques';
+  if (view === 'calendar') return 'Calendrier';
+  return 'Objectif premier circuit complet';
+}
+
+function clamp(value, min, max) {
+  return Math.min(max, Math.max(min, value));
+}
+
+function slugify(value) {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
 }
 
 createRoot(document.getElementById('root')).render(<App />);
